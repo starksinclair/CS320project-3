@@ -5,6 +5,8 @@ import java.util.Map;
 import java.util.function.BiConsumer;
 
 public class Server {
+    private static BufferedInputStream clientIn;
+
     public static void main(String[] args) {
         int port = 3002;
 
@@ -14,16 +16,15 @@ public class Server {
                 System.out.println("Waiting for a client...");
                 Socket clientSocket = my_socket.accept();
                 System.out.println("Client connected: " + clientSocket.getInetAddress());
-                InputStream inputStream = clientSocket.getInputStream();
-                OutputStream outputStream = clientSocket.getOutputStream();
+                clientIn = new BufferedInputStream(clientSocket.getInputStream());
 
-                BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream));
                 String line;
-                while ((line = reader.readLine()) != null){
+                while ((line = readLine(clientIn)) != null){
                     System.out.println("Client cmd: " + line);
                     Map<String, BiConsumer<String, Socket>> handlers = initializeCommandHandlers();
-                    String command = line.split(" ")[0];
-                    String argsString = line.substring(command.length()).trim();
+                    String[] cmdParts = line.split("\\?", 2);
+                    String command = cmdParts[0];
+                    String argsString = cmdParts.length > 1 ? cmdParts[1] : "";
                     BiConsumer<String, Socket> handler= handlers.get(command);
                     if (handler == null) {
                         System.out.println("Unknown command: " + command);
@@ -38,6 +39,16 @@ public class Server {
         } catch (Exception e) {
             e.printStackTrace();
         }
+    }
+
+    private static String readLine(InputStream in) throws IOException {
+        StringBuilder sb = new StringBuilder();
+        int b;
+        while ((b = in.read()) != -1) {
+            if (b == '\n') return sb.toString();
+            if (b != '\r') sb.append((char) b);
+        }
+        return !sb.isEmpty() ? sb.toString() : null;
     }
 
     private static Map<String, BiConsumer<String, Socket>> initializeCommandHandlers() {
@@ -79,10 +90,11 @@ public class Server {
         System.out.println("Renaming file with args: " + s);
        try {
             OutputStream outputStream = socket.getOutputStream();
-           String [] parts = s.split(" ");
+           String [] parts = s.split("\\?");
            if (parts.length != 2) {
                outputStream.write("ERROR: rename command requires exactly 2 arguments: oldname and newname\n".getBytes());
                outputStream.flush();
+               return;
            }
            String oldName = parts[0];
            String newName = parts[1];
@@ -146,10 +158,11 @@ public class Server {
         System.out.println("Uploading file with args: " + s);
         try {
             OutputStream outputStream = socket.getOutputStream();
-            String [] parts = s.split(" ");
+            String [] parts = s.split("\\?");
             if (parts.length != 2) {
                 outputStream.write("ERROR: upload command requires exactly 2 arguments: filename and filesize\n".getBytes());
                 outputStream.flush();
+                return;
             }
             String fileName = parts[0];
             long fileSize = Long.parseLong(parts[1]);
@@ -161,10 +174,21 @@ public class Server {
             try (FileOutputStream fileOutputStream = new FileOutputStream(newFile)) {
                 byte[] buffer = new byte[4096];
                 long bytesReceived = 0;
-               int bytesRead;
-                while (bytesReceived < fileSize && (bytesRead = socket.getInputStream().read(buffer)) != -1 ) {
+                int bytesRead;
+                while (bytesReceived < fileSize) {
+                    int toRead = (int) Math.min(buffer.length, fileSize - bytesReceived);
+                    bytesRead = clientIn.read(buffer, 0, toRead);
+
+                    if (bytesRead == -1) {
+                        throw new IOException("Unexpected end of stream. Expected " + fileSize + " bytes, got " + bytesReceived);
+                    }
                     fileOutputStream.write(buffer, 0, bytesRead);
                     bytesReceived += bytesRead;
+
+                    if (bytesReceived % (1024 * 1024) == 0 || bytesReceived == fileSize) {
+                        System.out.printf("Progress: %d / %d bytes (%.1f%%)%n",
+                                bytesReceived, fileSize, (bytesReceived * 100.0 / fileSize));
+                    }
                 }
             }
             outputStream.write(("OK: File uploaded: " + fileName + "\n").getBytes());
@@ -202,7 +226,7 @@ public class Server {
 
            // Send file size first
            long fileSize = file.length();
-           outputStream.write(("OK " + fileSize + "\n").getBytes());
+           outputStream.write(("OK?" + fileSize + "\n").getBytes());
            outputStream.flush();
 
            // Send file contents
@@ -217,17 +241,6 @@ public class Server {
            System.out.println("File sent successfully.");
        } catch (IOException e) {
            throw new RuntimeException(e);
-       }
-//        if (!my_file.exists() && !my_file.isDirectory()) {
-//            try(FileInputStream fileInputStream = new FileInputStream(my_file)) {
-//                byte[] fileBuffer = new byte[1024];
-//                while ((bytesRead=fileInputStream.read(fileBuffer)) != -1) {
-//                    outputStream.write(fileBuffer, 0, bytesRead);
-//                }
-//            }
-//        } else if (!my_file.exists()) {
-//            System.out.println("File not found on server: " + my_file.getAbsolutePath());
-//        }else {
-//            System.out.println("Requested file is a directory, not a file: " + my_file.getAbsolutePath());
+       };
         }
 }

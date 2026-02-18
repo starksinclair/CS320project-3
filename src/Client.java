@@ -4,7 +4,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Scanner;
-import java.util.function.Consumer;
+import java.util.function.BiConsumer;
 
 public class Client {
     public static void main(String[] args) {
@@ -15,13 +15,13 @@ public class Client {
         String serverAddress = args[0];
         int port = Integer.parseInt(args[1]);
         Scanner scanner = new Scanner(System.in);
-        Map<String, Map<String, Consumer<Socket>>> commands = getCommandHandlers();
+        Map<String, Map<String, BiConsumer<Socket, BufferedReader>>> commands = getCommandHandlers();
 
         System.out.println("Welcome to the File Explorer Client!");
         System.out.println();
         System.out.println("Available commands:");
         int count = 1;
-        for (Map.Entry<String, Map<String, Consumer<Socket>>> command : commands.entrySet()) {
+        for (Map.Entry<String, Map<String, BiConsumer<Socket, BufferedReader>>> command : commands.entrySet()) {
             for (String desc : command.getValue().keySet()) {
                 System.out.printf("  %d) %-15s : %s%n", count++, command.getKey(), desc);
             }
@@ -30,6 +30,7 @@ public class Client {
 
         try (Socket socket = new Socket(serverAddress, port)) {
             System.out.println("Connected to the echo server at " + serverAddress + ":" + port);
+            BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
 
             while (true) {
                 System.out.println("Enter a command to proceed (or 'run quit' to quit at any time). ");
@@ -38,24 +39,21 @@ public class Client {
                     continue;
                 }
 
-                Map<String, Consumer<Socket>> handlerMap = commands.get(input);
+                Map<String, BiConsumer<Socket, BufferedReader>> handlerMap = commands.get(input);
                 if (handlerMap == null) {
                     System.out.println("Unknown command: " + input);
                     continue;
                 }
-                // Each handlerMap in this design contains a single entry (description -> handler), so call it.
-                Consumer<Socket> handler = handlerMap.values().iterator().next();
-                handler.accept(socket);
-
-                // don't close the socket here; it will be closed by the try-with-resources when the app exits
+                BiConsumer<Socket, BufferedReader> handler = handlerMap.values().iterator().next();
+                handler.accept(socket, reader);
             }
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
 
-    private static Map<String, Map<String, Consumer<Socket>>> getCommandHandlers() {
-        Map<String, Map<String, Consumer<Socket>>> handlers = new HashMap<>();
+    private static Map<String, Map<String, BiConsumer<Socket, BufferedReader>>> getCommandHandlers() {
+        Map<String, Map<String, BiConsumer<Socket, BufferedReader>>> handlers = new HashMap<>();
 
         handlers.put("run list", Map.of("list <directory> - List files on the server", Client::handleGetListCommand));
         handlers.put("run delete", Map.of("delete <filename> - Remove a file on the server", Client::handleDeleteCommand));
@@ -67,18 +65,18 @@ public class Client {
         return handlers;
     }
 
-    private static void handleGetListCommand(Socket socket) {
+    private static void handleGetListCommand(Socket socket, BufferedReader reader) {
        try {
-            listServerFiles(socket);
+            listServerFiles(socket, reader);
            System.out.println("------------------------------------------------------------------");
 
        } catch (IOException e) {
            throw new RuntimeException(e);
        }
     }
-    private static void handleDeleteCommand(Socket socket) {
+    private static void handleDeleteCommand(Socket socket, BufferedReader reader) {
          try {
-            listServerFiles(socket);
+            listServerFiles(socket, reader);
             System.out.println("Enter the name of the file to delete from the server:");
             Scanner scanner = new Scanner(System.in);
             String fileName = scanner.nextLine();
@@ -88,7 +86,6 @@ public class Client {
             }
             sendRequest(socket, "delete", fileName);
              System.out.println("deleting ....");
-            BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
             String response = reader.readLine();
             if (response.startsWith("ERROR")) {
                 System.out.println(response);
@@ -105,9 +102,9 @@ public class Client {
         }
 
     }
-    private static void handleRenameCommand(Socket socket) {
+    private static void handleRenameCommand(Socket socket, BufferedReader reader) {
           try {
-             listServerFiles(socket);
+             listServerFiles(socket, reader);
              System.out.println("Enter the name of the file to rename:");
              Scanner scanner = new Scanner(System.in);
              String oldName = scanner.nextLine();
@@ -121,9 +118,8 @@ public class Client {
                 System.out.println("No new filename provided. Aborting rename.");
                 return;
             }
-            sendRequest(socket, "rename", oldName + " " + newName);
+            sendRequest(socket, "rename", oldName + "?" + newName);
             System.out.println("renaming ....");
-            BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
             String response = reader.readLine();
              if (response.startsWith("ERROR")) {
                  System.out.println(response);
@@ -139,9 +135,9 @@ public class Client {
              e.printStackTrace();
          }
     }
-    private static void handleDownloadCommand(Socket socket) {
+    private static void handleDownloadCommand(Socket socket, BufferedReader reader) {
         try {
-            listServerFiles(socket);
+            listServerFiles(socket, reader);
             System.out.println("Enter the name of the file to request from the server:");
             Scanner scanner = new Scanner(System.in);
             String fileName = scanner.nextLine();
@@ -151,16 +147,14 @@ public class Client {
                 return;
             }
 
-            InputStream inputStream = socket.getInputStream();
             sendRequest(socket, "download", fileName);
             System.out.println("downloading ....");
-            BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream));
             String response = reader.readLine();
             if (response.startsWith("ERROR")) {
                 System.out.println(response);
                 return;
             }
-            String[] parts = response.split(" ");
+            String[] parts = response.split("\\?");
             long fileSize = Long.parseLong(parts[1]);
 
             // Read file contents
@@ -175,7 +169,7 @@ public class Client {
                 long totalRead = 0;
                 int bytesRead;
 
-                while (totalRead < fileSize && (bytesRead = inputStream.read(buffer)) != -1) {
+                while (totalRead < fileSize && (bytesRead = socket.getInputStream().read(buffer)) != -1) {
                     fos.write(buffer, 0, bytesRead);
                     totalRead += bytesRead;
                 }
@@ -187,7 +181,7 @@ public class Client {
             e.printStackTrace();
         }
     }
-    private static void handleUploadCommand(Socket socket) {
+    private static void handleUploadCommand(Socket socket, BufferedReader reader) {
         try {
             System.out.println("-------------------------------------------------------------------");
             System.out.println("Displaying files in the local ClientFiles directory:");
@@ -212,13 +206,15 @@ public class Client {
             String fileName = scanner.nextLine();
             if (fileName.isBlank()) {
                 System.out.println("No filename provided. Aborting upload.");
+                return;
             }
             File fileToUpload = new File(uploadFolder, fileName);
             if (!fileToUpload.exists() || fileToUpload.isDirectory()) {
                 System.out.println("File not found for upload: " + fileToUpload.getAbsolutePath());
+                return;
             }
             long size = fileToUpload.length();
-            sendRequest(socket, "upload", fileName + " " + size);
+            sendRequest(socket, "upload", fileName + "?" + size);
             System.out.println("uploading ....");
             try (FileInputStream fis = new FileInputStream(fileToUpload)) {
                 byte[] buffer = new byte[4096];
@@ -228,7 +224,6 @@ public class Client {
                 }
                 socket.getOutputStream().flush();
             }
-            BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
             String response = reader.readLine();
             if (response.startsWith("ERROR")) {
                 System.out.println(response);
@@ -244,8 +239,8 @@ public class Client {
             e.printStackTrace();
         }
     }
-    private static void handleQuitCommand(Socket socket) {
-        System.out.println("Handling quit command with args: ");
+    private static void handleQuitCommand(Socket socket, BufferedReader reader) {
+        System.out.println("Goodbye!");
         try {
             socket.close();
         } catch (IOException e) {
@@ -253,14 +248,11 @@ public class Client {
         }
         System.exit(0);
     }
-    private static void listServerFiles(Socket socket) throws IOException {
+    private static void listServerFiles(Socket socket, BufferedReader reader) throws IOException {
         System.out.println("-------------------------------------------------------------------");
         System.out.println("Displaying files on the server:");
         System.out.println("-------------------------------------------------------------------");
-        InputStream inputStream = socket.getInputStream();
         sendRequest(socket, "list", null);
-
-        BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream));
 
         // Read the count of files
         int fileCount = Integer.parseInt(reader.readLine());
@@ -279,7 +271,7 @@ public class Client {
     private static void sendRequest(Socket socket, String command, String args) throws IOException {
         OutputStream outputStream = socket.getOutputStream();
 
-        String payload = command + (args == null ? "" : " " + args) + "\n";
+        String payload = command + (args == null ? "" : "?" + args) + "\n";
         outputStream.write(payload.getBytes(StandardCharsets.UTF_8));
         outputStream.flush();
     }
